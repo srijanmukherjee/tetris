@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 600
@@ -53,6 +54,7 @@ typedef struct {
 
 typedef struct {
     Piece piece;
+    Piece next_piece;
     bool over;
     float y;
     int yspeed;
@@ -64,7 +66,7 @@ typedef struct {
     SDL_Texture *play_btn_texture;
     Mix_Music *bg_music;
     TTF_Font *font;
-    SDL_Texture *home_screen_header;
+    uint32_t score;
 } Game;
 
 // returns the index of (x, y) corresponding to the rotated shape
@@ -168,8 +170,13 @@ int home_screen(Game *game) {
     if (counter > INT_MAX)
         counter = 0;
     y = 10 * sin(counter);
+    TTF_SetFontSize(game->font, 80);
+    SDL_Surface *surface = TTF_RenderText_Solid(
+        game->font, "The Tetris", (SDL_Color){255, 255, 255, 255});
+    SDL_Texture *texture =
+        SDL_CreateTextureFromSurface(game->renderer, surface);
 
-    SDL_RenderCopy(game->renderer, game->home_screen_header, NULL,
+    SDL_RenderCopy(game->renderer, texture, NULL,
                    &(SDL_Rect){WINDOW_WIDTH / 2 - 150,
                                WINDOW_HEIGHT / 2 - 75 - 100 + y, 300, 150});
 
@@ -177,6 +184,9 @@ int home_screen(Game *game) {
                    &(SDL_Rect){px, py, play_btn_width, play_btn_height});
 
     SDL_RenderPresent(game->renderer);
+
+    SDL_FreeSurface(surface);
+    SDL_DestroyTexture(texture);
     return SCREEN_HOME;
 }
 
@@ -220,7 +230,7 @@ int play_screen(Game *game) {
     }
 
     if (game->over)
-        return SCREEN_PLAY;
+        return SCREEN_GAME_OVER;
 
     SDL_SetRenderDrawColor(game->renderer, 51, 51, 51, 255);
     SDL_RenderClear(game->renderer);
@@ -262,18 +272,18 @@ int play_screen(Game *game) {
         }
 
         int shape = rand() % 7;
-        game->piece.shape = tetriminos[shape];
+        game->piece = game->next_piece;
+        game->next_piece.shape = tetriminos[shape];
         game->y = 0;
-        game->piece.y = 0;
-        game->piece.color = shape;
-        game->piece.x = BOARD_WIDTH / 2;
-        game->piece.rotation = 0;
+        game->next_piece.y = 0;
+        game->next_piece.color = shape;
+        game->next_piece.x = BOARD_WIDTH / 2;
+        game->next_piece.rotation = 0;
 
         game->over = !does_piece_fit(game->piece.shape, game->piece.x,
                                      game->piece.y, game->piece.rotation);
 
         if (game->over) {
-            // TODO : draw only overlapping portion
             return SCREEN_PLAY;
         }
     }
@@ -338,18 +348,150 @@ int play_screen(Game *game) {
                         board[(py - 1) * BOARD_WIDTH + px];
                 board[px] = 0;
             }
+            game->score += 100;
         }
         line_ptr = 0;
         get_delta();
+    }
+
+    // draw score and next piece
+
+    int xoff = game->board_xoff + PIECE_WIDTH * BOARD_WIDTH;
+    int section_width = WINDOW_WIDTH - xoff;
+    int next_piece_padding = 10;
+
+    // make sure we have enough space to draw the next piece
+    if (section_width > 4 * PIECE_WIDTH + 2 * next_piece_padding) {
+
+        int w = 4 * PIECE_WIDTH + 2 * next_piece_padding;
+        int x = xoff + (section_width - w) / 2;
+        int y = 50;
+
+        // draw next piece
+        SDL_SetRenderDrawColor(game->renderer, 255, 255, 255, 255);
+        SDL_RenderFillRect(game->renderer,
+                           &(SDL_Rect){x, y, w + next_piece_padding, 2});
+
+        SDL_RenderFillRect(game->renderer,
+                           &(SDL_Rect){x, y, 2, w + next_piece_padding});
+
+        SDL_RenderFillRect(game->renderer,
+                           &(SDL_Rect){x + next_piece_padding + w, y, 2,
+                                       w + next_piece_padding});
+
+        SDL_RenderFillRect(game->renderer,
+                           &(SDL_Rect){x, y + next_piece_padding + w,
+                                       w + next_piece_padding, 2});
+        for (int px = 0; px < 4; px++) {
+            for (int py = 0; py < 4; py++) {
+                int idx = rotate(px, py, game->next_piece.rotation);
+                if (game->next_piece.shape[idx] == 'x') {
+                    SDL_RenderCopy(
+                        game->renderer, game->pieces_texture,
+                        &(SDL_Rect){game->next_piece.color * 30, 0, 30, 30},
+                        &(SDL_Rect){x + next_piece_padding + px * PIECE_WIDTH +
+                                        PIECE_PADDING,
+                                    y + next_piece_padding + py * PIECE_HEIGHT,
+                                    PIECE_WIDTH - 2 * PIECE_PADDING,
+                                    PIECE_HEIGHT - 2 * PIECE_PADDING});
+                }
+            }
+        }
+
+        // draw score
     }
 
     SDL_RenderPresent(game->renderer);
     return SCREEN_PLAY;
 }
 
-int game_over_screen(Game *game) { return 2; }
+int game_over_screen(Game *game) {
+    static int y = 0;
+    static double counter = 0;
+    static char score[100];
+
+    int back_h = 80;
+    int back_w = 150;
+    int back_x = WINDOW_WIDTH / 2 - back_w / 2;
+    int back_y = WINDOW_HEIGHT / 2 + 150 - back_h / 2;
+    bool clicked = false;
+
+    SDL_Event event;
+    if (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            return SCREEN_EXIT;
+        }
+
+        if (event.type == SDL_MOUSEBUTTONUP) {
+            clicked = true;
+        }
+    }
+
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+
+    if (mx >= back_x && mx <= back_x + back_w && my >= back_y &&
+        my <= back_y + back_w) {
+        back_w = 200;
+        back_x = WINDOW_WIDTH / 2 - back_w / 2;
+        if (clicked)
+            return SCREEN_HOME;
+    }
+
+    float dt = get_delta();
+    counter = (counter + 5 * dt);
+    if (counter > INT_MAX)
+        counter = 0;
+    y = 10 * sin(counter);
+
+    SDL_SetRenderDrawColor(game->renderer, 51, 51, 51, 255);
+    SDL_RenderClear(game->renderer);
+
+    TTF_SetFontSize(game->font, 80);
+    SDL_Surface *surface = TTF_RenderText_Solid(
+        game->font, "Game Over", (SDL_Color){255, 255, 255, 255});
+    SDL_Texture *texture =
+        SDL_CreateTextureFromSurface(game->renderer, surface);
+
+    SDL_RenderCopy(game->renderer, texture, NULL,
+                   &(SDL_Rect){WINDOW_WIDTH / 2 - 150,
+                               WINDOW_HEIGHT / 2 - 75 - 100 + y, 300, 150});
+
+    SDL_FreeSurface(surface);
+    SDL_DestroyTexture(texture);
+
+    sprintf(score, "Score: %d", game->score);
+
+    TTF_SetFontSize(game->font, 50);
+    surface = TTF_RenderText_Solid(game->font, score,
+                                   (SDL_Color){255, 255, 255, 255});
+    texture = SDL_CreateTextureFromSurface(game->renderer, surface);
+
+    SDL_RenderCopy(game->renderer, texture, NULL,
+                   &(SDL_Rect){WINDOW_WIDTH / 2 - 75,
+                               WINDOW_HEIGHT / 2 + 50 - 40, 150, 80});
+
+    SDL_FreeSurface(surface);
+    SDL_DestroyTexture(texture);
+
+    TTF_SetFontSize(game->font, 50);
+    surface = TTF_RenderText_Solid(game->font, "Go Back",
+                                   (SDL_Color){255, 255, 255, 255});
+    texture = SDL_CreateTextureFromSurface(game->renderer, surface);
+
+    SDL_RenderCopy(game->renderer, texture, NULL,
+                   &(SDL_Rect){back_x, back_y, back_w, back_h});
+
+    SDL_FreeSurface(surface);
+    SDL_DestroyTexture(texture);
+
+    SDL_RenderPresent(game->renderer);
+
+    return SCREEN_GAME_OVER;
+}
 
 int main() {
+    srand(time(NULL));
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
         fprintf(stderr, "ERROR: failed to initialize SDL: %s\n",
                 SDL_GetError());
@@ -414,10 +556,17 @@ int main() {
         SDL_CreateTextureFromSurface(renderer, play_btn_surface);
     SDL_FreeSurface(play_btn_surface);
 
-    Game game = {.piece = {.shape = tetriminos[4],
-                           .color = 4,
+    int p1 = rand() % 7;
+    int p2 = rand() % 7;
+
+    Game game = {.piece = {.shape = tetriminos[1],
+                           .color = p1,
                            .x = BOARD_WIDTH / 2,
                            .y = 0},
+                 .next_piece = {.shape = tetriminos[2],
+                                .color = p2,
+                                .x = BOARD_WIDTH / 2,
+                                .y = 0},
                  .board_xoff = (WINDOW_WIDTH - BOARD_WIDTH * PIECE_WIDTH) / 2,
                  .board_yoff =
                      (WINDOW_HEIGHT - BOARD_HEIGHT * PIECE_HEIGHT) / 2,
@@ -427,7 +576,8 @@ int main() {
                  .renderer = renderer,
                  .window = window,
                  .y = 0,
-                 .yspeed = 3};
+                 .yspeed = 3,
+                 .score = 0};
 
     game.bg_music = Mix_LoadMUS("./assets/music/bg.mp3");
 
@@ -439,12 +589,9 @@ int main() {
         fprintf(stderr, "ERROR: failed to load font: %s\n", SDL_GetError());
         exit(1);
     }
-    SDL_Surface *surface = TTF_RenderText_Solid(
-        game.font, "The Tetris", (SDL_Color){255, 255, 255, 255});
-    game.home_screen_header = SDL_CreateTextureFromSurface(renderer, surface);
-    // SDL_FreeSurface(surface);
 
     int screen = SCREEN_HOME;
+    int prev_screen = SCREEN_HOME;
 
     while (true) {
         switch (screen) {
@@ -462,8 +609,36 @@ int main() {
         if (screen == SCREEN_EXIT) {
             break;
         }
+
+        if (prev_screen == SCREEN_HOME && screen == SCREEN_PLAY) {
+            Mix_VolumeMusic(50);
+        }
+
+        if (prev_screen == SCREEN_PLAY && screen == SCREEN_GAME_OVER) {
+            Mix_VolumeMusic(10);
+        }
+
+        if (prev_screen == SCREEN_GAME_OVER && screen == SCREEN_HOME) {
+            // reset game state
+            game.over = false;
+            game.piece = (Piece){.shape = tetriminos[1],
+                                 .color = p1,
+                                 .x = BOARD_WIDTH / 2,
+                                 .y = 0};
+            game.next_piece = (Piece){.shape = tetriminos[2],
+                                      .color = p2,
+                                      .x = BOARD_WIDTH / 2,
+                                      .y = 0};
+            game.y = 0;
+            game.yspeed = 3;
+            game.score = 0;
+            memset(board, 0,
+                   BOARD_WIDTH * BOARD_HEIGHT * sizeof(unsigned char));
+        }
+
+        prev_screen = screen;
     }
-    SDL_DestroyTexture(game.home_screen_header);
+    TTF_CloseFont(game.font);
     SDL_DestroyTexture(color_pieces_texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
